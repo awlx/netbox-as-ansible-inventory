@@ -27,7 +27,7 @@ def cli_arguments():
 
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument("-c", "--config-file",
-                        default=os.getenv("NETBOX_CONFIG_FILE", "netbox.yml"),
+                        default=os.getenv("NETBOX_CONFIG_FILE", "devices/netbox.yml"),
                         help="""Path for script's configuration. Also "NETBOX_CONFIG_FILE"
                                 could be used as env var to set conf file path.""")
     parser.add_argument("--list", help="Print all hosts with vars as Ansible dynamic inventory syntax.",
@@ -161,6 +161,7 @@ class NetboxAsInventory(object):
 
         if not api_url:
             sys.exit("Please check API URL in script configuration file.")
+        api_url = api_url + "/dcim/devices"
 
         api_url_headers = {}
         api_url_params = {}
@@ -252,7 +253,7 @@ class NetboxAsInventory(object):
                     for group in groups_categories[category]:
                         # Try to get group value. If the section not found in netbox, this also will print error message.
                         if data_dict:
-                            group_value = self._get_value_by_path(data_dict, [group, key_name])
+                            group_value = self._get_value_by_path(data_dict, [group, key_name]).replace(":","_")
 
                             if group_value:
                                 inventory_dict = self.add_host_to_group(server_name, group_value, inventory_dict)
@@ -354,9 +355,12 @@ class NetboxAsInventory(object):
         if netbox_hosts_list:
             inventory_dict.update({"_meta": {"hostvars": {}}})
             for current_host in netbox_hosts_list:
+                ifaces = get_node_interfaces_and_ips(current_host['id'], self.api_url, self.api_token)
                 server_name = current_host.get("name")
                 self.add_host_to_inventory(self.group_by, inventory_dict, current_host)
                 host_vars = self.get_host_vars(current_host, self.hosts_vars)
+                for iface in ifaces:
+                    host_vars[iface] = ifaces[iface]
                 inventory_dict = self.update_host_meta_vars(inventory_dict, server_name, host_vars)
         return inventory_dict
 
@@ -378,6 +382,35 @@ class NetboxAsInventory(object):
             result = {}
         print(json.dumps(result))
 
+def get_node_interfaces_and_ips (device_id, api_url, api_token):
+        api_url = ("%s/ipam/ip-addresses/?device_id=%s" % ( api_url, device_id))
+
+        api_url_headers = {}
+        api_url_params = {}
+        api_url_headers.update({"Authorization": "Token %s" % api_token})
+
+        ip_list = []
+
+        # Pagination.
+        while api_url:
+            # Get hosts list.
+            api_output = requests.get(api_url, params=api_url_params, headers=api_url_headers)
+
+            # Check that a request is 200 and not something else like 404, 401, 500 ... etc.
+            api_output.raise_for_status()
+
+            # Get api output data.
+            api_output_data = api_output.json()
+
+            if isinstance(api_output_data, dict) and "results" in api_output_data:
+                ip_list += api_output_data["results"]
+                api_url = api_output_data["next"]
+        ip_iface = {}
+        for address in ip_list:
+            if address != "":
+                iface_name = address['interface']['name'].replace(".", "_")
+                ip_iface[iface_name] = address['address']
+        return(ip_iface)
 
 # Main.
 def main():
@@ -389,7 +422,6 @@ def main():
     netbox = NetboxAsInventory(args, config_data)
     ansible_inventory = netbox.generate_inventory()
     netbox.print_inventory_json(ansible_inventory)
-
 
 # Run main.
 if __name__ == "__main__":
